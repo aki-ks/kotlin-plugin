@@ -1,3 +1,0 @@
-kotlinLib("stdlib")
-
-kotlincOptions += "-verbose"
