@@ -6,7 +6,8 @@ import java.util.jar.JarEntry
 
 import sbt.Keys.{Classpath, TaskStreams}
 import sbt._
-import sbt.classpath.ClasspathUtilities
+import sbt.internal.inc.classpath.ClasspathUtilities
+import sbt.io.Using
 
 import collection.JavaConverters._
 import language.existentials
@@ -59,10 +60,15 @@ object KotlinCompile {
         grepjar(_)(_.getName.startsWith(
           "META-INF/services/org.jetbrains.kotlin.compiler.plugin"))
       }
-      val cp = cpjars.mkString(File.pathSeparator)
-      val pcp = pluginjars.map(_.getAbsolutePath).toArray
-      args.classpath = Option(args.classpath[String]).fold(cp)(_ + File.pathSeparator + cp)
-      args.pluginClasspaths = Option(args.pluginClasspaths[Array[String]]).fold(pcp)(_ ++ pcp)
+      args.classpath = {
+        val compilerJars = compilerClasspath map (_.data)
+        val fullClasspath = Option(args.classpath[String]) ++ compilerJars ++ cpjars
+        fullClasspath.mkString(File.pathSeparator)
+      }
+      args.pluginClasspaths = {
+        val pcp = pluginjars.map(_.getAbsolutePath).toArray
+        Option(args.pluginClasspaths[Array[String]]).fold(pcp)(_ ++ pcp)
+      }
       args.pluginOptions = Option(args.pluginOptions[Array[String]]).fold(
         kotlinPluginOptions.toArray)(_ ++ kotlinPluginOptions.toArray[String])
       output.mkdirs()
@@ -161,14 +167,28 @@ case class KotlinStub(s: TaskStreams, kref: KotlinReflection) {
   def compilerArgs = {
     import language.dynamics
     new Dynamic {
+      def withFirstUpper(string: String): String = string.head.toUpper + string.tail
+      def getterName(field: String) = s"get${withFirstUpper(field)}"
+      def setterName(field: String) = s"set${withFirstUpper(field)}"
+
       def selectDynamic[A](field: String): A = {
-        val f = compilerArgsClass.getField(field)
-        f.get(instance).asInstanceOf[A]
+        val methodName = getterName(field)
+        val getterOpt = compilerArgsClass.getMethods.find(_.getName == methodName)
+        getterOpt match {
+          case Some(getter) => getter.invoke(instance).asInstanceOf[A]
+          case None => compilerArgsClass.getField(field).get(instance).asInstanceOf[A]
+        }
       }
+
       def updateDynamic(field: String)(value: Any): Unit = {
-        val f = compilerArgsClass.getField(field)
-        f.set(instance, value)
+        val methodName = setterName(field)
+        val setterOpt = compilerArgsClass.getMethods.find(_.getName == methodName)
+        setterOpt match {
+          case Some(setter) => setter.invoke(instance, value.asInstanceOf[Object])
+          case None => compilerArgsClass.getField(field).set(instance, value)
+        }
       }
+
       val instance = compilerArgsClass.newInstance().asInstanceOf[AnyRef]
     }
   }
